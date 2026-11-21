@@ -51,7 +51,7 @@
   </div>
 
   <!-- 首頁（封面） -->
-  <div id="home" class="screen" style="background-image: url('images/cover.jpg');">
+  <div id="home" class="screen" style="background-image: url('images/cover.png');">
     <div class="hotspot" onclick="showScreen('intro')"></div>
   </div>
 
@@ -90,7 +90,7 @@
 const bgm = new Audio('sounds/bgm.mp3');
 bgm.loop = true;
 bgm.volume = 0.05;
-bgm.preload = 'auto';
+bgm.preload = 'none'; // 不在開頁時就下載，等使用者點擊後再載
 
 let audioUnlocked = false;
 async function unlockAudioOnce(){
@@ -145,6 +145,7 @@ function playSfx(name, vol=1){
 }
 
 function ensureAudioInitOnGesture(){
+  if (bgm.preload !== 'auto'){ bgm.preload = 'auto'; try{ bgm.load(); }catch{} }
   unlockAudioOnce();
   initSfxOnce().catch(console.warn);
 }
@@ -259,11 +260,11 @@ function beginLoadingToGame(){
     });
   };
 
+  if (bgm.readyState >= 3) startNow();
   bgm.addEventListener('canplaythrough', startNow, { once:true });
+  bgm.addEventListener('error', startNow, { once:true });
   // 防呆：最多等 1500ms 就先進遊戲，音樂稍後補播
   setTimeout(startNow, 1500);
-
-  try{ bgm.load(); }catch{}
 }
 
 // ========= 關卡 / 掉落 / 判定 =========
@@ -284,14 +285,31 @@ function prepareLevel(){
   startLevelTimer();
 }
 
+// 食物圖片只載一次並重複使用（原本每掉一個就重新 new Image，網路慢時會一直卡住）
+const foodImages = {};
+function getFoodImage(file){
+  if(!foodImages[file]){ const img = new Image(); img.src = `images/${file}`; foodImages[file] = img; }
+  return foodImages[file];
+}
+let assetsPreloaded = false;
+function preloadGameAssets(){
+  if(assetsPreloaded) return; assetsPreloaded = true;
+  allFoods.forEach(f => getFoodImage(f.file));
+  Object.values(transitionScreens).concat(['images/result1.jpg','images/result2.jpg','images/result3.jpg'])
+    .forEach(src => { const i = new Image(); i.src = src; });
+}
+
 function spawnFood(){
   if(currentFood || foodQueue.length===0) return;
   const f = foodQueue.shift();
-  const img = new Image();
-  img.onload = ()=>{
-    currentFood = { ...f, image: img, x: Math.random()*(canvas.width-80), y:0, size:90, speed:3 };
-  };
-  img.src = `images/${f.file}`;
+  const img = getFoodImage(f.file);
+  const place = ()=>{ currentFood = { ...f, image: img, x: Math.random()*(canvas.width-80), y:0, size:90, speed:3 }; };
+  if(img.complete && img.naturalWidth) place();
+  else {
+    img.addEventListener('load', place, { once:true });
+    // 圖片壞掉就跳過這個，不要整個遊戲停住
+    img.addEventListener('error', ()=>{ if(foodQueue.length>0) spawnFood(); else showTransition(); }, { once:true });
+  }
 }
 
 let hitboxDifficulty = 'normal';
@@ -411,17 +429,18 @@ window.onload = () => {
 window.addEventListener('load', ()=>{
   const loadingText = document.getElementById('loadingText');
   let loaded = 0;
-  const imgs = ['images/cover.jpg', 'images/intro.jpg', 'images/K1.jpg'];
+  const imgs = ['images/cover.png', 'images/intro.jpg', 'images/K1.jpg'];
+  let done = false;
+  const goHome = () => { if(done) return; done = true; showScreen('home'); preloadGameAssets(); };
   function checkDone(){
     loaded++;
-    loadingText.textContent = `載入中... ${loaded}/${imgs.length + 1}`;
-    if(loaded >= imgs.length + 1){
-      setTimeout(()=> showScreen('home'), 300);
-    }
+    loadingText.textContent = `載入中... ${loaded}/${imgs.length}`;
+    if(loaded >= imgs.length) setTimeout(goHome, 300);
   }
-  bgm.addEventListener('canplaythrough', checkDone, { once:true });
-  try{ bgm.load(); }catch{}
+  // 不再等背景音樂：手機（尤其 iOS）在使用者點擊前不會載入音訊，會永遠卡在載入畫面
   imgs.forEach(src => { const img=new Image(); img.onload=checkDone; img.onerror=checkDone; img.src=src; });
+  // 防呆：網路很慢時最多等 8 秒就先進首頁
+  setTimeout(goHome, 8000);
   showScreen('loading');
 });
 </script>
