@@ -1,0 +1,430 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>營養接接樂</title>
+  <style>
+    html, body { margin: 0; padding: 0; height: 100dvh; width: 100vw; overflow: hidden; }
+    .screen {
+      position: fixed; top: 0; left: 0;
+      width: 100vw; height: 100dvh;
+      background-size: cover; background-position: center; background-repeat: no-repeat;
+      display: none;
+    }
+    .active { display: flex; justify-content: center; align-items: center; flex-direction: column; }
+    .hotspot {
+      position: absolute; width: 500px; height: 100px; bottom: 80px; left: 50%;
+      transform: translateX(-50%); cursor: pointer;
+    }
+
+    /* 新增：簡單的允許按鈕樣式（最原始） */
+    #permissionBox {
+      position: absolute;
+      bottom: 150px;
+      left: 50%;
+      transform: translateX(-50%);
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+      align-items: center;
+      text-align: center;
+    }
+    #permissionBox p { margin: 0; padding: 6px 8px; background: rgba(255,255,255,0.9); border-radius: 6px; color: #000; font-size: 16px;}
+    #allowOrientationBtn {
+      padding: 10px 18px;
+      font-size: 16px;
+      border: 1px solid #333;
+      background: #fff;
+      border-radius: 8px;
+      cursor: pointer;
+    }
+
+    canvas { display: block; pointer-events: none; z-index: -1; position: relative; }
+  </style>
+</head>
+<body>
+
+  <!-- 載入（預設 active） -->
+  <div id="loading" class="screen active" style="background: black; color: white; display:flex;justify-content:center;align-items:center;flex-direction:column;">
+    <div id="loadingText" style="font-size:28px">載入中...</div>
+  </div>
+
+  <!-- 首頁（封面） -->
+  <div id="home" class="screen" style="background-image: url('images/cover.jpg');">
+    <div class="hotspot" onclick="showScreen('intro')"></div>
+  </div>
+
+  <!-- intro -->
+  <div id="intro" class="screen" style="background-image: url('images/intro.jpg');">
+  <div class="hotspot" onclick="showScreen('permission')"></div>
+  </div>
+
+  <!-- 新增允許頁（黑底白字） -->
+<div id="permission" class="screen" style="background:black; color:white; flex-direction:column;justify-content:center;align-items:center;">
+  <p style="font-size:45px; margin-bottom:40px;text-align:center;max-width:500px;line-height:1.8;">請按下「允許」<br> 開啟手機搖晃功能</p>
+  <button id="allowOrientationBtn" style="padding:40px 70px;font-size:40px;border:2px solid #fff;background:#000;color:#fff;border-radius:12px;cursor:pointer;">
+    ✅ 允許
+  </button>
+</div>
+
+  <!-- K1 過場 -->
+  <div id="K1Transition" class="screen" style="background-image: url('images/K1.jpg');">
+    <div class="hotspot" onclick="startGame()"></div>
+  </div>
+
+  <div id="gameCanvasContainer" class="screen">
+    <canvas id="gameCanvas"></canvas>
+  </div>
+
+  <div id="betweenLevel" class="screen">
+    <div class="hotspot" onclick="nextLevelStart()"></div>
+  </div>
+
+  <div id="result" class="screen">
+    <div id="scoreResult"></div>
+    <div class="hotspot" onclick="location.reload()"></div>
+  </div>
+<script>
+// ========= 音訊：BGM（HTMLAudio） + SFX（WebAudio） =========
+const bgm = new Audio('sounds/bgm.mp3');
+bgm.loop = true;
+bgm.volume = 0.05;
+bgm.preload = 'auto';
+
+let audioUnlocked = false;
+async function unlockAudioOnce(){
+  if (audioUnlocked) return;
+  audioUnlocked = true;
+  try{
+    const AC = window.AudioContext || window.webkitAudioContext;
+    if(!AC) return;
+    const ctx = new AC();
+    await ctx.resume();
+    const buffer = ctx.createBuffer(1,1,22050);
+    const src = ctx.createBufferSource();
+    src.buffer = buffer; src.connect(ctx.destination); src.start(0);
+    setTimeout(()=>{ try{ ctx.close(); }catch{} }, 120);
+  }catch(e){ console.log('unlockAudioOnce fail', e); }
+}
+
+// --- Web Audio: SFX ---
+let actx = null, sfx = {}, sfxReady = false;
+async function initSfxOnce(){
+  if (sfxReady) return;
+  const AC = window.AudioContext || window.webkitAudioContext;
+  actx = actx || new AC();
+  await actx.resume();
+
+  const files = {
+    click: 'sounds/click.mp3',
+    good : 'sounds/good.mp3',
+    bad  : 'sounds/bad.mp3',
+    wrong: 'sounds/wrong.mp3'
+  };
+
+  // 輕量並行載入＋解碼
+  await Promise.all(Object.entries(files).map(async ([key, url])=>{
+    const arr = await fetch(url).then(r=>r.arrayBuffer());
+    sfx[key] = await new Promise((res, rej)=> actx.decodeAudioData(arr, res, rej));
+  }));
+
+  sfxReady = true;
+}
+
+function playSfx(name, vol=1){
+  if (!actx || !sfx[name]) return;
+  try{
+    const src = actx.createBufferSource();
+    src.buffer = sfx[name];
+    const gain = actx.createGain();
+    gain.gain.value = vol;
+    src.connect(gain).connect(actx.destination);
+    src.start(0);
+  }catch(e){ console.warn('sfx play err', e); }
+}
+
+function ensureAudioInitOnGesture(){
+  unlockAudioOnce();
+  initSfxOnce().catch(console.warn);
+}
+
+// ========= 遊戲畫面 / 狀態 =========
+const canvas = document.getElementById('gameCanvas');
+const ctx = canvas.getContext('2d');
+canvas.width = window.innerWidth; canvas.height = window.innerHeight;
+
+const basket = { x: canvas.width/2 - 60, y: canvas.height - 100, width: 120, height: 80 };
+let currentFood = null, foodQueue = [], score = 0, level = 1;
+let stats = {1:{good:0,bad:0},2:{good:0,bad:0},3:{good:0,bad:0}};
+let bgTimeout = null;
+let orientationAllowed = false;
+
+const bgImages = { 0:new Image(),1:new Image(),2:new Image(),3:new Image() };
+bgImages[0].src = 'images/bg0.jpg'; bgImages[1].src = 'images/bg1.jpg'; bgImages[2].src = 'images/bg2.jpg'; bgImages[3].src = 'images/bg3.jpg';
+let bgImg = bgImages[0];
+const bowlImg = new Image(); bowlImg.src = 'images/bowl.png';
+const transitionScreens = {1:'images/K2.jpg', 2:'images/K3.jpg'};
+
+const allFoods = [
+  { file:"GM1.png", type:"meat", health:"good" },
+  { file:"GM3.png", type:"meat", health:"good" },
+  { file:"GM4.png", type:"meat", health:"good" },
+  { file:"GM5.png", type:"meat", health:"good" },
+  { file:"BM2.png", type:"meat", health:"bad" },
+  { file:"BM3.png", type:"meat", health:"bad" },
+  { file:"GV1.png", type:"vegetable", health:"good" },
+  { file:"GV2.png", type:"vegetable", health:"good" },
+  { file:"GV3.png", type:"vegetable", health:"good" },
+  { file:"GV4.png", type:"vegetable", health:"good" },
+  { file:"GV5.png", type:"vegetable", health:"good" },
+  { file:"GStrach1.png", type:"rice", health:"good" },
+  { file:"GStrach3.png", type:"rice", health:"good" },
+  { file:"BStrach1.png", type:"rice", health:"bad" },
+  { file:"BStrach2.png", type:"rice", health:"bad" },
+  { file:"BStrach3.png", type:"rice", health:"bad" },
+];
+
+// ========= 畫面切換 =========
+function showScreen(id){
+  document.querySelectorAll('.screen').forEach(s=>s.classList.remove('active'));
+  const el = document.getElementById(id);
+  if (el) el.classList.add('active');
+}
+
+// ========= 允許裝置方向 =========
+const allowBtn = document.getElementById('allowOrientationBtn');
+allowBtn.addEventListener('click', async () => {
+  // 在用戶手勢中解鎖/初始化音訊
+  ensureAudioInitOnGesture();
+  playSfx('click'); if(navigator.vibrate) navigator.vibrate(80);
+
+  if (typeof DeviceOrientationEvent !== 'undefined' && typeof DeviceOrientationEvent.requestPermission === 'function') {
+    try {
+      const res = await DeviceOrientationEvent.requestPermission();
+      if (res === 'granted') {
+        orientationAllowed = true;
+        window.addEventListener('deviceorientation', handleOrientation);
+        showScreen('K1Transition');
+      } else {
+        alert('您未允許裝置方向存取，請開啟權限後再試。');
+      }
+    } catch (err) {
+      console.warn('requestPermission error', err);
+      alert('授權失敗或被拒。');
+    }
+  } else {
+    orientationAllowed = true;
+    window.addEventListener('deviceorientation', handleOrientation);
+    showScreen('K1Transition');
+  }
+});
+
+// ========= 開始遊戲（從 K1） =========
+function startGame(){
+  ensureAudioInitOnGesture();
+  if(!orientationAllowed && typeof DeviceOrientationEvent !== 'undefined' && typeof DeviceOrientationEvent.requestPermission === 'function'){
+    DeviceOrientationEvent.requestPermission().then(res=>{
+      if(res === 'granted'){ orientationAllowed = true; window.addEventListener('deviceorientation', handleOrientation); }
+      beginLoadingToGame();
+    }).catch(()=> beginLoadingToGame());
+  } else {
+    beginLoadingToGame();
+  }
+}
+
+// ========= 載入 → 進遊戲，BGM 播放保險 =========
+function beginLoadingToGame(){
+  unlockAudioOnce();
+  showScreen('loading');
+  const loadingText = document.getElementById('loadingText');
+  loadingText.textContent = '載入背景音樂中...';
+
+  let started = false;
+  const startNow = () => {
+    if (started) return;
+    started = true;
+
+    loadingText.textContent = '載入中，請稍等!';
+
+    // 進入遊戲
+    showScreen('gameCanvasContainer');
+    level = 1; score = 0;
+    prepareLevel(); loop();
+
+    // 嘗試播放 BGM；若被擋，下一次點擊再播
+    bgm.play().catch(()=>{
+      const one = () => { bgm.play().catch(()=>{}); document.removeEventListener('pointerdown', one); };
+      document.addEventListener('pointerdown', one, { once:true });
+    });
+  };
+
+  bgm.addEventListener('canplaythrough', startNow, { once:true });
+  // 防呆：最多等 1500ms 就先進遊戲，音樂稍後補播
+  setTimeout(startNow, 1500);
+
+  try{ bgm.load(); }catch{}
+}
+
+// ========= 關卡 / 掉落 / 判定 =========
+function prepareLevel(){
+  foodQueue = [];
+  const correctFoods = allFoods.filter(f =>
+    (level===1 && f.type==='meat'       && f.health==='good') ||
+    (level===2 && f.type==='vegetable'  && f.health==='good') ||
+    (level===3 && f.type==='rice'       && f.health==='good')
+  );
+  const incorrectFoods = allFoods.filter(f => !correctFoods.includes(f));
+
+  for(let i=0;i<10;i++){
+    foodQueue.push(correctFoods[Math.floor(Math.random()*correctFoods.length)]);
+    foodQueue.push(incorrectFoods[Math.floor(Math.random()*incorrectFoods.length)]);
+  }
+  spawnFood();
+  startLevelTimer();
+}
+
+function spawnFood(){
+  if(currentFood || foodQueue.length===0) return;
+  const f = foodQueue.shift();
+  const img = new Image();
+  img.onload = ()=>{
+    currentFood = { ...f, image: img, x: Math.random()*(canvas.width-80), y:0, size:90, speed:3 };
+  };
+  img.src = `images/${f.file}`;
+}
+
+let hitboxDifficulty = 'normal';
+const HITBOX_PRESETS = { easy:{shrinkX:5,verticalTolerance:40}, normal:{shrinkX:15,verticalTolerance:25}, hard:{shrinkX:25,verticalTolerance:15} };
+const HITBOX_CUSTOM = { shrinkX:20, verticalTolerance:20 };
+function getHitboxParams(){ if(hitboxDifficulty==='custom') return HITBOX_CUSTOM; return HITBOX_PRESETS[hitboxDifficulty]||HITBOX_PRESETS.normal; }
+
+function isColliding(food,basket){
+  const { shrinkX, verticalTolerance } = getHitboxParams();
+  const foodBottom = food.y + food.size;
+  const foodCenterX = food.x + food.size/2;
+  const plateTop = basket.y;
+  const plateLeft = basket.x + shrinkX;
+  const plateRight = basket.x + basket.width - shrinkX;
+  return (foodBottom >= plateTop && foodBottom <= plateTop + verticalTolerance &&
+          foodCenterX > plateLeft && foodCenterX < plateRight);
+}
+
+function update(){
+  if(!currentFood) return;
+  currentFood.y += currentFood.speed;
+  const caught = isColliding(currentFood, basket);
+  const missed = currentFood.y > canvas.height;
+  if(caught || missed){
+    if(caught) handleCatch(currentFood);
+    currentFood = null;
+    if(foodQueue.length>0) spawnFood(); else showTransition();
+  }
+}
+
+function handleCatch(food){
+  if(navigator.vibrate) navigator.vibrate(30);
+  if(food.health === 'bad'){
+    score -= 2; stats[level].bad++; bgImg = bgImages[3]; playSfx('bad');
+  } else if( (level===1 && food.type==='meat') ||
+             (level===2 && food.type==='vegetable') ||
+             (level===3 && food.type==='rice') ){
+    score += 2; stats[level].good++; bgImg = bgImages[1]; playSfx('good');
+  } else {
+    score -= 1; stats[level].bad++; bgImg = bgImages[2]; playSfx('wrong');
+  }
+  if(bgTimeout) clearTimeout(bgTimeout);
+  bgTimeout = setTimeout(()=>{ bgImg = bgImages[0]; }, 3000);
+}
+
+// ========= 計時 / 繪製 / 迴圈 =========
+let levelTime = 65, timeLeft = levelTime, timerInterval = null;
+function startLevelTimer(){
+  timeLeft = levelTime;
+  clearInterval(timerInterval);
+  timerInterval = setInterval(()=>{
+    timeLeft--;
+    if(timeLeft<=0){ clearInterval(timerInterval); showTransition(); }
+  }, 1000);
+}
+
+function draw(){
+  if(bgImg.complete) ctx.drawImage(bgImg,0,0,canvas.width,canvas.height);
+  if(bowlImg.complete) ctx.drawImage(bowlImg, basket.x, basket.y, basket.width, basket.height);
+  if(currentFood?.image?.complete) ctx.drawImage(currentFood.image, currentFood.x, currentFood.y, currentFood.size, currentFood.size);
+
+  ctx.font = "bold 24px sans-serif"; ctx.fillStyle = "black";
+  ctx.fillText(`關卡 ${level} 分數:${score}`, 10, 40);
+  ctx.textAlign = "right"; ctx.fillText(`剩餘時間: ${timeLeft}s`, canvas.width - 10, 40); ctx.textAlign = "left";
+  ctx.fillText(getLevelTarget(level), 10, 80);
+}
+function getLevelTarget(l){
+  if(l===1) return "本關目標：只吃健康蛋白質";
+  if(l===2) return "本關目標：只吃蔬菜";
+  if(l===3) return "本關目標：只吃健康澱粉";
+  return "";
+}
+
+function loop(){ update(); draw(); if(level<=3) requestAnimationFrame(loop); }
+
+function showTransition(){
+  clearInterval(timerInterval);
+  if(level<3){
+    document.getElementById('betweenLevel').style.backgroundImage = `url('${transitionScreens[level]}')`;
+    showScreen('betweenLevel');
+  } else showResult();
+}
+function nextLevelStart(){ level++; showScreen('gameCanvasContainer'); prepareLevel(); }
+function showResult(){
+  clearInterval(timerInterval);
+  showScreen('result');
+  const bg = score>=20 ? 'result1.jpg' : score>=10 ? 'result2.jpg' : 'result3.jpg';
+  document.getElementById('result').style.backgroundImage = `url('images/${bg}')`;
+  document.getElementById('scoreResult').innerHTML = '';
+  setTimeout(()=>{ document.getElementById('scoreResult').innerHTML =
+    `<div style="font-size:60px;color:red;font-weight:bold;text-shadow:2px 2px 4px white;margin-bottom:100px;">${score} 分！</div>`;
+  }, 800);
+}
+
+// ========= 裝置方向 =========
+function handleOrientation(ev){
+  const tilt = ev.gamma;
+  if(tilt != null){
+    basket.x += tilt * 0.5;
+    basket.x = Math.max(0, Math.min(canvas.width - basket.width, basket.x));
+  }
+}
+
+// ========= hotspot 統一處理：先解鎖/初始化音訊，再觸發原邏輯 =========
+window.onload = () => {
+  document.querySelectorAll('.hotspot').forEach(button=>{
+    const original = button.onclick;
+    button.onclick = (e) => {
+      ensureAudioInitOnGesture();
+      playSfx('click'); if(navigator.vibrate) navigator.vibrate(80);
+      if (typeof original === 'function') original.call(button, e);
+    };
+  });
+};
+
+// ========= 初次載入：預載封面，載好後進 home =========
+window.addEventListener('load', ()=>{
+  const loadingText = document.getElementById('loadingText');
+  let loaded = 0;
+  const imgs = ['images/cover.jpg', 'images/intro.jpg', 'images/K1.jpg'];
+  function checkDone(){
+    loaded++;
+    loadingText.textContent = `載入中... ${loaded}/${imgs.length + 1}`;
+    if(loaded >= imgs.length + 1){
+      setTimeout(()=> showScreen('home'), 300);
+    }
+  }
+  bgm.addEventListener('canplaythrough', checkDone, { once:true });
+  try{ bgm.load(); }catch{}
+  imgs.forEach(src => { const img=new Image(); img.onload=checkDone; img.onerror=checkDone; img.src=src; });
+  showScreen('loading');
+});
+</script>
+</body>
+</html>
+
