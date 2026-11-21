@@ -10,6 +10,7 @@
       position: fixed; top: 0; left: 0;
       width: 100vw; height: 100dvh;
       background-size: cover; background-position: center; background-repeat: no-repeat;
+      background-color: #000; /* 圖片缺少時不會透出底下的「載入中」畫面 */
       display: none;
     }
     .active { display: flex; justify-content: center; align-items: center; flex-direction: column; }
@@ -46,7 +47,7 @@
 <body>
 
   <!-- 載入（預設 active） -->
-  <div id="loading" class="screen active" style="background: black; color: white; display:flex;justify-content:center;align-items:center;flex-direction:column;">
+  <div id="loading" class="screen active" style="background: black; color: white;">
     <div id="loadingText" style="font-size:28px">載入中...</div>
   </div>
 
